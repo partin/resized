@@ -1,5 +1,6 @@
 //
-// heavily based on wmctrl 1.07-6. (http://wmctrl.sourcearchive.com/documentation/1.07-6/main_8c-source.html)
+// using code from wmctrl 1.07-6. (http://wmctrl.sourcearchive.com/documentation/1.07-6/main_8c-source.html)
+// using wildcard string comparison code from Jack Handy (http://www.codeproject.com/KB/string/wildcmp.aspx)
 //
 // This program is free software which I release under the GNU General Public
 // License. You may redistribute and/or modify this program under the terms
@@ -15,19 +16,22 @@
 // Free Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 //
 
+#include <unistd.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
+#include <X11/extensions/Xrandr.h>
 
 #define _NET_WM_STATE_REMOVE        0    /* remove/unset property */
 #define _NET_WM_STATE_ADD           1    /* add/set property */
 #define _NET_WM_STATE_TOGGLE        2    /* toggle property  */
 #define MAX_PROPERTY_VALUE_LEN 4096
 #define PIPENAME "/tmp/resized"
+#define TIME_LIMIT 300*1000 // us = 0.3 s
 
 int wildcmp(const char *wild, const char *string) {
     // Written by Jack Handy - jakkhandy@hotmail.com
@@ -317,20 +321,18 @@ static Window get_window_by_title(Display *disp, const char *title) {
 
 // -----------------------------------------------------------------------------------
 
-int state = 0;
+struct screen_info_t {
+    int x, y, width, height, toppad;
+};
+
+struct screen_info_t *screens;
+int num_screens;
+int storedpos = 0;
+int storedscreen = 0;
 Window activeWin = 0;
+struct timeval storedtime;
 
 void command(Display *disp, const char *cmd) {
-
-    // left screen:
-    const int lw = 1280; // width
-    const int lh = 1024; // height
-    const int lt = 24;   // padding at top
-
-    // right screen:
-    const int rw = 1280; // width
-    const int rh = 1024; // height
-    const int rt = 0;    // padding at top
 
     // need two characters
     if (cmd[0] == '\0')
@@ -339,17 +341,9 @@ void command(Display *disp, const char *cmd) {
     Window prevWin = activeWin;
     activeWin = get_active_window(disp);
 
-    int dx, dy, w, h;
-    if (cmd[0] == 'l') {
-        dx = 0; dy = lt; w = lw; h = lh-lt;
-    }
-    else if (cmd[0] == 'r') {
-        dx = lw; dy = rt; w = rw; h = rh-rt;
-    }
-    else if (cmd[0] == '+') {
+    if (cmd[0] == '+') {
         window_maximize(disp, activeWin, _NET_WM_STATE_TOGGLE);
         XFlush(disp);
-        state = 0;
         return;
     }
     else if (cmd[0] == 'a') {
@@ -358,121 +352,166 @@ void command(Display *disp, const char *cmd) {
             window_activate(disp, win);
             XFlush(disp);
         }
-        state = 0;
         return;
     }
-    else
-        return;
+    else if (cmd[0] >= '0' && cmd[0] <= '9') { // move & resize
+        const char *pos = strchr(cmd, '.');
+        if (pos == NULL)
+            return;
 
-    if (cmd[1] == '0') {
-        state = 0;
-        return;
-    }
-    if (state == 0 || activeWin != prevWin) {
-        state = cmd[1]-'0';
-        return;
+        int screenid = atoi(cmd);
+        if (screenid >= num_screens) // valid screen id?
+            return;
+
+        int posid = atoi(pos+1);
+        if (posid < 1 || posid > 9) // valid position id?
+            return;
+
+        struct timeval time;
+
+        gettimeofday(&time, NULL);
+
+        long timediff = (time.tv_sec - storedtime.tv_sec) * 1000*1000 + time.tv_usec - storedtime.tv_usec;
+        storedtime = time;
+
+        if (storedpos == 0 || activeWin != prevWin || timediff > TIME_LIMIT) {
+            // first point set
+            storedpos = posid;
+            storedscreen = screenid;
+
+            // move and resize window anyway
+
+            int xstart = screens[storedscreen].x;
+            int ystart = screens[storedscreen].y + screens[storedscreen].toppad;
+            int w = screens[storedscreen].width;
+            int h = screens[storedscreen].height - screens[storedscreen].toppad;
+
+            switch (posid) {
+            case 7: xstart += 0;   ystart += 0;   w = w/2; h = h/2; break;
+            case 8: xstart += 0;   ystart += 0;   w = w;   h = h/2; break;
+            case 9: xstart += w/2; ystart += 0;   w = w/2; h = h/2; break;
+            case 4: xstart += 0;   ystart += 0;   w = w/2; h = h;   break;
+            case 5: xstart += 0;   ystart += 0;   w = w;   h = h;   break;
+            case 6: xstart += w/2; ystart += 0;   w = w/2; h = h;   break;
+            case 1: xstart += 0;   ystart += h/2; w = w/2; h = h/2; break;
+            case 2: xstart += 0;   ystart += h/2; w = w;   h = h/2; break;
+            case 3: xstart += w/2; ystart += h/2; w = w/2; h = h/2; break;
+            }
+
+            char *name = get_window_title(disp, activeWin);
+            if (strcmp("Terminal", name) == 0)
+                h -= 16;
+
+            window_fullscreen(disp, activeWin, _NET_WM_STATE_REMOVE);
+            window_maximize(disp, activeWin, _NET_WM_STATE_REMOVE);
+            window_move_resize(disp, activeWin, 1, xstart, ystart, w, h);
+            XFlush(disp);
+
+            return;
+        }
+
+        // second point set: move & resize
+
+        int startpos = storedpos;
+        storedpos = 0;
+
+        int xstart = screens[storedscreen].x;
+        int ystart = screens[storedscreen].y + screens[storedscreen].toppad;
+        int w = screens[storedscreen].width;
+        int h = screens[storedscreen].height - screens[storedscreen].toppad;
+
+        switch (startpos) {
+        case 7: case 4: case 1: xstart += 0; break;
+        case 8: case 5: case 2: xstart += w/3; break;
+        case 9: case 6: case 3: xstart += 2*w/3; break;
+        default: return;
+        }
+        switch (startpos) {
+        case 7: case 8: case 9: ystart += 0; break;
+        case 4: case 5: case 6: ystart += h/3; break;
+        case 1: case 2: case 3: ystart += 2*h/3; break;
+        default: return;
+        }
+
+        //int endstate = posid;
+
+        int xend = screens[screenid].x;
+        int yend = screens[screenid].y + screens[screenid].toppad;
+        int wend = screens[screenid].width;
+        int hend = screens[screenid].height - screens[screenid].toppad;
+
+        switch (posid) {
+        case 7: case 4: case 1: xend += wend/3; break;
+        case 8: case 5: case 2: xend += 2*wend/3; break;
+        case 9: case 6: case 3: xend += wend; break;
+        default: return;
+        }
+        switch (posid) {
+        case 7: case 8: case 9: yend += hend/3; break;
+        case 4: case 5: case 6: yend += 2*hend/3; break;
+        case 1: case 2: case 3: yend += hend; break;
+        default: return;
+        }
+
+        if (xend <= xstart || yend <= ystart) {
+            storedpos = posid;
+            storedscreen = screenid;
+            return;
+        }
+
+        char *name = get_window_title(disp, activeWin);
+        if (strcmp("Terminal", name) == 0) {
+            yend -= 16;
+        }
+
+        window_fullscreen(disp, activeWin, _NET_WM_STATE_REMOVE);
+        window_maximize(disp, activeWin, _NET_WM_STATE_REMOVE);
+        window_move_resize(disp, activeWin, 1, xstart, ystart, xend-xstart, yend-ystart);
+        XFlush(disp);
     }
 
-
-    int ystart;
-    switch (state) {
-    case 7: case 8: case 9: ystart = dy; break;
-    case 4: case 5: case 6: ystart = dy+h/3; break;
-    case 1: case 2: case 3: ystart = dy+2*h/3; break;
-    default:
-        return;
-    }
-    int xstart;
-    switch (state) {
-    case 7: case 4: case 1: xstart = dx; break;
-    case 8: case 5: case 2: xstart = dx+lw/3; break;
-    case 9: case 6: case 3: xstart = dx+2*lw/3; break;
-    default:
-        return;
-    }
-
-    state = 0;
-    int endstate = cmd[1]-'0';
-
-    int endy;
-    switch (endstate) {
-    case 7: case 8: case 9: endy = dy+h/3; break;
-    case 4: case 5: case 6: endy = dy+2*h/3; break;
-    case 1: case 2: case 3: endy = dy+h; break;
-    default:
-        return;
-    }
-    int endx;
-    switch (endstate) {
-    case 7: case 4: case 1: endx = dx+w/3; break;
-    case 8: case 5: case 2: endx = dx+2*w/3; break;
-    case 9: case 6: case 3: endx = dx+w; break;
-    default:
-        return;
-    }
-
-    if (endx <= xstart || endy <= ystart) {
-        state = endstate;
-        return;
-    }
-
-    char *name = get_window_title(disp, activeWin);
-    if (strcmp("Terminal", name) == 0) {
-        endy -= 16;
-    }
-
-    window_fullscreen(disp, activeWin, _NET_WM_STATE_REMOVE);
-    window_maximize(disp, activeWin, _NET_WM_STATE_REMOVE);
-    window_move_resize(disp, activeWin, 1, xstart, ystart, endx-xstart, endy-ystart);
-    XFlush(disp);
+    return;
 }
 
-int main(void) {
-
+int getScreenRes(Display *disp) {
     int i;
-    pid_t pid, sid;
-    FILE *fp;
+    int screen = DefaultScreen(disp);
+    Window root = RootWindow (disp, screen);
 
-    // Fork off the parent process
-    pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "fork() failed");
-        exit(EXIT_FAILURE);
+    int major, minor;
+    if (!XRRQueryVersion (disp, &major, &minor) || major < 1 || (major == 1 && minor < 2)) {
+        //fprintf(stderr, "Need RandR version 1.2\n");
+        return EXIT_FAILURE;
     }
 
-    // If we got a good PID, then we can exit the parent process.
-    if (pid > 0)
-        exit(EXIT_SUCCESS);
-
-    // Change the file mode mask
-    umask(0);
-
-    // Create a new SID for the child process
-    sid = setsid();
-    if (sid < 0) {
-        fprintf(stderr, "setsid() failed");
-        exit(EXIT_FAILURE);
+    XRRScreenResources *res = XRRGetScreenResources(disp, root);
+    if (!res) {
+        //fprintf(stderr, "XRRGetScreenResources() failed\n");
+        return EXIT_FAILURE;
     }
 
-    // Create named pipe
-    if (mknod(PIPENAME, S_IFIFO|0666, 0) != 0) {
-        remove(PIPENAME);
-        if (mknod(PIPENAME, S_IFIFO|0666, 0) != 0) {
-            fprintf(stderr, "mknod failed");
-            exit(EXIT_FAILURE);
+    num_screens = res->ncrtc;
+    screens = malloc(num_screens * sizeof(struct screen_info_t));
+    for (i = 0; i < res->ncrtc; i++) {
+        XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(disp, res, res->crtcs[i]);
+        if (!crtc_info) {
+            //fprintf(stderr, "XRRGetCrtcInfo() failed\n");
+            free(screens);
+            return EXIT_FAILURE;
         }
+        screens[i].x = crtc_info->x;
+        screens[i].y = crtc_info->y;
+        screens[i].width = crtc_info->width;
+        screens[i].height = crtc_info->height;
+        screens[i].toppad = 0;
+        XRRFreeCrtcInfo(crtc_info);
     }
+    XRRFreeScreenResources(res);
+    return EXIT_SUCCESS;
+}
 
-    // Close out the standard file descriptors
-    for (i = getdtablesize(); i >= 0; --i)
-        close(i);
-
-    Display *disp;
-    if (! (disp = XOpenDisplay(NULL))) {
-        //fprintf(stderr, "Cannot open display.\n");
-        exit(EXIT_FAILURE);
-    }
-
+void mainloop(Display *disp) {
+    FILE *fp;
     for (;;) {
         char readbuf[80];
         //fprintf(stderr, "ready to open\n"); fflush(stderr);
@@ -501,9 +540,68 @@ int main(void) {
 
         //fprintf(stderr, "processed string: %s\n", readbuf); fflush(stderr);
     }
+}
+
+int main(void) {
+
+    int i;
+    pid_t pid, sid;
+
+    // Fork off the parent process
+    pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "fork() failed");
+        return EXIT_FAILURE;
+    }
+
+    // If we got a good PID, then we can exit the parent process.
+    if (pid > 0)
+        return EXIT_FAILURE;
+
+    // Change the file mode mask
+    umask(0);
+
+    // Create a new SID for the child process
+    sid = setsid();
+    if (sid < 0) {
+        fprintf(stderr, "setsid() failed");
+        return EXIT_FAILURE;
+    }
+
+    // Create named pipe
+    if (mknod(PIPENAME, S_IFIFO|0666, 0) != 0) {
+        remove(PIPENAME);
+        if (mknod(PIPENAME, S_IFIFO|0666, 0) != 0) {
+            fprintf(stderr, "mknod failed");
+            return EXIT_FAILURE;
+        }
+    }
+
+    // Close out the standard file descriptors
+    for (i = getdtablesize(); i >= 0; --i)
+        close(i);
+
+    Display *disp = XOpenDisplay(NULL);
+    if (!disp) {
+        //fprintf(stderr, "XOpenDisplay() failed\n");
+        remove(PIPENAME);
+        return EXIT_FAILURE;
+    }
+
+    if (getScreenRes(disp) != EXIT_SUCCESS) {
+        XCloseDisplay(disp);
+        remove(PIPENAME);
+        return EXIT_FAILURE;
+    }
+
+    screens[0].toppad = 24;
+
+    mainloop(disp);
+
+    free(screens);
 
     //fprintf(stderr, "Goodbye\n");
     XCloseDisplay(disp);
     remove(PIPENAME);
-    exit(EXIT_SUCCESS);
+    return EXIT_SUCCESS;
 }
