@@ -1,0 +1,45 @@
+RESIZED
+=======
+
+DESCRIPTION
+  A daemon to move and resize windows into predefined locations.
+
+USAGE
+  Opens a named pipe /tmp/resized which accepts the following commands:
+
+    <screenid>.<positionid> -- mark point on screen
+    "+"                     -- maximize the active window
+    "a<STRING>"             -- activate window with a title matching <STRING>
+    "QUIT"                  -- quit
+
+  Assign keyboard shortcuts using your favorite software to write these
+  commands to /tmp/resized. A suggestion is to map "<Super>KP_End" to run
+  "sh -c 'echo 0.1 >/tmp/resized'", for example.
+
+  The "mark point" commands are used to move and resize the active window.
+  If a single command is sent, the window will be moved to that position.
+  If two commands are received within a short time, these points specify
+  the corners of the window. The first command specifies the upper left
+  corner and bottom right corner of the window. 
+  
+  When marking points, <screenid> is which screen, starting from 0, and
+  <positionid> which is a number between 1 and 9 which is mapped to
+  positions on the screen in a way that resembles the layout of the
+  numeric keypad. For example, "0.7" marks the upper left corner on the
+  first screen.
+
+  EXAMPLE:
+      # echo "0.8" >/tmp/resized;
+    moves the active window to the top half of the first screen
+
+  EXAMPLE:
+      # echo "0.7" >/tmp/resized; echo "0.7" >/tmp/resized
+    moves the active window to the upper left corner of the first screen.
+
+  EXAMPLE:
+      # echo "0.7" >/tmp/resized; echo "0.3" >/tmp/resized
+    moves the active window to fill the whole first screen.
+
+  EXAMPLE:
+      # echo "a*Firefox" >/tmp/resized
+    activates the window whose title ends with Firefox.
