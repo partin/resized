@@ -169,6 +169,66 @@ static int client_msg(Display *disp, Window win, char *msg,
     return EXIT_FAILURE;
 }
 
+//static void get_size_hints(Display *disp, Window win) {
+//    XSizeHints *hints = XAllocSizeHints();
+//    long supplied;
+//
+//    if (XGetWMNormalHints(disp, win, hints, &supplied)) {
+//        if (supplied & PMinSize)
+//          //fprintf(stderr, "      Program supplied minimum size: %d by %d\n",
+//             hints->min_width, hints->min_height);
+//
+//        if (supplied & PMaxSize)
+//            //fprintf(stderr, "      Program supplied maximum size: %d by %d\n",
+//             hints->max_width, hints->max_height);
+//        if (supplied & PResizeInc) {
+//            //fprintf(stderr, "      Program supplied x resize increment: %d\n",
+//             hints->width_inc);
+//            //fprintf(stderr, "      Program supplied y resize increment: %d\n",
+//             hints->height_inc);
+//          if (supplied & PMinSize)
+//              //fprintf(stderr, "      Program supplied minimum size in resize increments: %s by %s\n",
+//                      hints->min_width / hints->width_inc, yscale(hints->min_height / hints->height_inc));
+//
+//        }
+//        XFree(hints);
+//    }
+//}
+
+static void get_frame_extents(Display *disp, Window win,
+        int *left, int *right, int *top, int *bottom) {
+
+    Atom actual_type;
+    int actual_format;
+    unsigned long nitems;
+    unsigned long bytes_remaining;
+    unsigned char *data;
+
+    int status = XGetWindowProperty(disp, win,
+            XInternAtom(disp, "_NET_FRAME_EXTENTS", True),
+            0,      // long_offset
+            4,      // long_length - we expect 4 32-bit values for _NET_FRAME_EXTENTS
+            False,  // delete
+            AnyPropertyType,
+            &actual_type,
+            &actual_format,
+            &nitems,
+            &bytes_remaining,
+            &data);
+
+    if (status != Success)
+        return;
+
+    if ((nitems == 4) && (bytes_remaining == 0)) {
+        long *data_as_long = (long *) ((void *) data);
+        *left   = (int) *(data_as_long++);
+        *right  = (int) *(data_as_long++);
+        *top    = (int) *(data_as_long++);
+        *bottom = (int) *(data_as_long++);
+    }
+    XFree(data);
+}
+
 static int window_move_resize (Display *disp, Window win,
         signed long grav,
         signed long x, signed long y,
@@ -180,6 +240,14 @@ static int window_move_resize (Display *disp, Window win,
     if (y != -1) grflags |= (1 << 9);
     if (w != -1) grflags |= (1 << 10);
     if (h != -1) grflags |= (1 << 11);
+
+    // adjust by frame extents
+    int left = 0, right = 0, top = 0, bottom = 0;
+    get_frame_extents(disp, win, &left, &right, &top, &bottom);
+    x += left;
+    y += top;
+    w -= left+right;
+    h -= top+bottom;
 
     if (wm_supports(disp, "_NET_MOVERESIZE_WINDOW")){
         return client_msg(disp, win, "_NET_MOVERESIZE_WINDOW",
@@ -244,16 +312,16 @@ static int window_activate(Display *disp, Window win) {
 static Window get_active_window(Display *disp) {
     char *prop;
     unsigned long size;
-    Window ret = (Window)0;
 
     prop = get_property(disp, DefaultRootWindow(disp), XA_WINDOW,
                         "_NET_ACTIVE_WINDOW", &size);
-    if (prop) {
-        ret = *((Window*)prop);
-        free(prop);
-    }
+    if (!prop)
+        return (Window) 0;
 
-    return(ret);
+    Window win = *((Window *) prop);
+    free(prop);
+
+    return win;
 }
 
 static char *get_window_title(Display *disp, Window win) {
@@ -398,13 +466,9 @@ void command(Display *disp, const char *cmd) {
             case 3: xstart += w/2; ystart += h/2; w = w/2; h = h/2; break;
             }
 
-            char *name = get_window_title(disp, activeWin);
-            if (strcmp("Terminal", name) == 0)
-                h -= 16;
-
             window_fullscreen(disp, activeWin, _NET_WM_STATE_REMOVE);
             window_maximize(disp, activeWin, _NET_WM_STATE_REMOVE);
-            window_move_resize(disp, activeWin, 1, xstart, ystart, w, h);
+            window_move_resize(disp, activeWin, 10, xstart, ystart, w, h);
             XFlush(disp);
 
             return;
@@ -459,14 +523,9 @@ void command(Display *disp, const char *cmd) {
             return;
         }
 
-        char *name = get_window_title(disp, activeWin);
-        if (strcmp("Terminal", name) == 0) {
-            yend -= 16;
-        }
-
         window_fullscreen(disp, activeWin, _NET_WM_STATE_REMOVE);
         window_maximize(disp, activeWin, _NET_WM_STATE_REMOVE);
-        window_move_resize(disp, activeWin, 1, xstart, ystart, xend-xstart, yend-ystart);
+        window_move_resize(disp, activeWin, 10, xstart, ystart, xend-xstart, yend-ystart);
         XFlush(disp);
     }
 
@@ -587,6 +646,17 @@ int main(void) {
         remove(PIPENAME);
         return EXIT_FAILURE;
     }
+
+//    num_screens = 2;
+//    screens = malloc(num_screens * sizeof(struct screen_info_t));
+//    screens[1].x = 1200;
+//    screens[1].y = 0;
+//    screens[1].width = 1050;
+//    screens[1].height = 1680;
+//    screens[0].x = 0;
+//    screens[0].y = 0;
+//    screens[0].width = 1200;
+//    screens[0].height = 1920;
 
     if (getScreenRes(disp) != EXIT_SUCCESS) {
         XCloseDisplay(disp);
